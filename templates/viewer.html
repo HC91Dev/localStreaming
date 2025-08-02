@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Screen Sharing with Audio</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- Add HLS.js (removed duplicate) -->
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 0; 
+            padding: 0;
+            background-color: #222;
+            overflow-x: hidden;
+        }
+        .header {
+            background-color: #333;
+            color: white;
+            padding: 15px 0;
+            position: relative;
+            z-index: 100;
+        }
+        .container { 
+            width: 100%;
+            max-width: 100%;
+            margin: 0 auto;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+        h1 { 
+            text-align: center; 
+            color: #fff; 
+            margin: 5px 0;
+            font-size: 24px;
+        }
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            margin: 10px 0;
+        }
+        button { 
+            padding: 8px 15px; 
+            cursor: pointer;
+            border: none;
+            border-radius: 5px;
+            font-weight: bold;
+            transition: all 0.2s;
+        }
+        button.start { background-color: #4CAF50; color: white; }
+        button.stop { background-color: #f44336; color: white; }
+        button.fullscreen { background-color: #2196F3; color: white; }
+        button:hover { opacity: 0.9; }
+        #status { 
+            padding: 8px; 
+            text-align: center;
+            margin: 8px auto;
+            max-width: 600px;
+            display: none;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        .video-container {
+            width: 100%;
+            height: calc(100vh - 120px);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: #000;
+            overflow: hidden;
+            margin: 0;
+            position: relative;
+        }
+        #video-player {
+            max-width: 100%;
+            max-height: 100%;
+            display: block;
+        }
+        
+        /* Fullscreen mode */
+        .fullscreen-mode {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 9999;
+            background: #000;
+        }
+        .fullscreen-mode #video-player {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+        
+        /* Hide header in fullscreen */
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="header" class="header">
+        <div class="container">
+            <h1>Screen Sharing with Audio</h1>
+            <div class="controls">
+                <button class="start" onclick="startHLSStream()">Start Stream</button>
+                <button class="stop" onclick="stopHLSStream()">Stop Stream</button>
+                <button class="fullscreen" onclick="toggleFullscreen()">Toggle Fullscreen</button>
+                <button class="start" onclick="startOBSStream()">Start OBS Stream</button>
+                <button class="stop" onclick="stopOBSStream()">Stop OBS Stream</button>
+            </div>
+            <div id="status"></div>
+        </div>
+    </div>
+    
+    <div id="videoContainer" class="video-container">
+        <video id="video-player" controls autoplay></video>
+    </div>
+    <script>
+        let hlsPlayer = null;
+const video = document.getElementById('video-player');
+
+// Start HLS stream function
+function startHLSStream() {
+    console.log("Starting HLS stream...");
+    fetch('/start_hls')
+        .then(response => response.json())
+        .then(data => {
+            updateStatus(data);
+            
+            if (data.status === 'success' || data.status === 'info') {
+                console.log("Success response received, initializing player in 2 seconds...");
+                // Give the server time to fully create the HLS files
+                setTimeout(initializeHLSPlayer, 2000);
+            }
+        })
+        .catch(handleError);
+}
+function initializeHLSPlayer() {
+    if (Hls.isSupported()) {
+        if (hlsPlayer) {
+            hlsPlayer.destroy();
+            hlsPlayer = null;
+        }
+
+        hlsPlayer = new Hls({
+            enableWorker: true,
+            lowLatencyMode: true,
+            // Add retry logic
+            manifestLoadingMaxRetry: 8,
+            manifestLoadingRetryDelay: 1000,
+            manifestLoadingMaxRetryTimeout: 64000
+        });
+        
+        // Add cache buster to URL
+        const fullUrl = window.location.origin + '/hls/stream.m3u8?_=' + Date.now();
+        console.log("Loading source:", fullUrl);
+        
+        hlsPlayer.loadSource(fullUrl);
+        hlsPlayer.attachMedia(video);
+        
+        hlsPlayer.on(Hls.Events.MANIFEST_PARSED, function() {
+            video.play().catch(e => console.error("Autoplay failed:", e));
+        });
+
+        hlsPlayer.on(Hls.Events.ERROR, function(event, data) {
+            console.error("HLS Error", data);
+            
+            // If we get a 404 on the manifest, retry after a delay
+            if (data.type === "networkError" && 
+                (data.details === "manifestLoadError" || data.details === "levelLoadError") &&
+                data.response && data.response.code === 404) {
+                
+                console.log("Stream not ready, retrying in 2 seconds...");
+                setTimeout(initializeHLSPlayer, 2000);
+            } else {
+                handleHLError(data);
+            }
+        });
+    }
+    else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = window.location.origin + '/hls/stream.m3u8?_=' + Date.now();
+        video.play().catch(e => console.error("Autoplay failed:", e));
+    }
+}
+
+// Stop HLS stream function
+function stopHLSStream() {
+    console.log("Stopping HLS stream...");
+    fetch('/stop_hls')
+        .then(response => response.json())
+        .then(data => {
+            updateStatus(data);
+            
+            // Clean up HLS player if it exists
+            if (hlsPlayer) {
+                hlsPlayer.destroy();
+                hlsPlayer = null;
+            }
+            // Clear the video source
+            video.src = '';
+            console.log("HLS stream stopped.");
+        })
+        .catch(handleError);
+}
+
+// OBS control functions
+function startOBSStream() {
+    console.log("Starting OBS stream...");
+    fetch('/start_stream')
+        .then(response => response.json())
+        .then(updateStatus)
+        .catch(handleError);
+}
+
+function stopOBSStream() {
+    console.log("Stopping OBS stream...");
+    fetch('/stop_stream')
+        .then(response => response.json())
+        .then(updateStatus)
+        .catch(handleError);
+}
+
+// Update status based on stream actions
+function updateStatus(data) {
+    const statusElement = document.getElementById('status');
+    statusElement.innerText = data.message;
+    statusElement.style.display = 'block';
+    statusElement.style.backgroundColor = data.status === 'success' ? '#dff2bf' : 
+                                           data.status === 'info' ? '#bde5f8' : '#ffbaba';
+    statusElement.style.color = data.status === 'success' ? '#4F8A10' : 
+                                  data.status === 'info' ? '#00529B' : '#D8000C';
+    
+    // Auto-hide status after 5 seconds for successful operations
+    if (data.status === 'success' || data.status === 'info') {
+        console.log("Success response received, initializing player in 5 seconds...");
+        setTimeout(() => {
+            statusElement.style.display = 'none';
+        }, 5000);
+    }
+}
+
+// Handle errors and display them in the status
+function handleError(err) {
+    const statusElement = document.getElementById('status');
+    statusElement.innerText = "Error: " + (err.message || "Failed to connect to stream");
+    statusElement.style.display = 'block';
+    statusElement.style.backgroundColor = '#ffbaba';
+    statusElement.style.color = '#D8000C';
+    console.error("Error:", err);
+}
+
+// Handle specific HLS errors (like network errors)
+function handleHLError(data) {
+    if (data.fatal) {
+        const statusElement = document.getElementById('status');
+        
+        // More user-friendly error messages
+        let errorMsg = "Stream error: ";
+        if (data.type === "networkError") {
+            errorMsg += "Cannot connect to stream. Please check if stream is running.";
+            // Try to reconnect after a delay
+            setTimeout(initializeHLSPlayer, 5000);
+        } else if (data.type === "mediaError") {
+            errorMsg += "Media playback error. Try refreshing the page.";
+        } else {
+            errorMsg += data.details || data.type;
+        }
+        
+        statusElement.innerText = errorMsg;
+        statusElement.style.display = 'block';
+        statusElement.style.backgroundColor = '#ffbaba';
+        statusElement.style.color = '#D8000C';
+        console.error("HLS Fatal Error:", data);
+    }
+}
+
+// Toggle fullscreen mode
+function toggleFullscreen() {
+    const container = document.getElementById('videoContainer');
+    const header = document.getElementById('header');
+    
+    container.classList.toggle('fullscreen-mode');
+    header.classList.toggle('hidden');
+    
+    if (container.classList.contains('fullscreen-mode')) {
+        document.body.style.overflow = 'hidden';
+    } else {
+        document.body.style.overflow = 'auto';
+    }
+}
+
+// Allow double-click on video to toggle fullscreen
+video.addEventListener('dblclick', toggleFullscreen);
+
+// Allow ESC key to exit fullscreen
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        const container = document.getElementById('videoContainer');
+        const header = document.getElementById('header');
+        
+        if (container.classList.contains('fullscreen-mode')) {
+            container.classList.remove('fullscreen-mode');
+            header.classList.remove('hidden');
+            document.body.style.overflow = 'auto';
+        }
+    }
+});
+
+// Add automatic reconnection if stream fails
+video.addEventListener('error', function(e) {
+    console.error('Video error:', e);
+    setTimeout(initializeHLSPlayer, 5000);
+});
+    </script>
+</body>
+</html>
